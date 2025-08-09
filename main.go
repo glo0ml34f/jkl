@@ -241,19 +241,23 @@ func parseJSON(b []byte, v interface{}) error {
 }
 
 func runSemgrepPatternDocker(repo, lang, pattern string) bool {
-	args := []string{"run", "--rm", "-v", repo + ":/src", "returntocorp/semgrep", "--json", "--lang", lang, "-e", pattern, "/src"}
-	cmd := exec.Command("docker", args...)
-	out, err := runCommand(cmd, 0, 1)
-	if err != nil {
-		return false
-	}
-	var data struct {
-		Results []struct{} `json:"results"`
-	}
-	if err := parseJSON(out, &data); err != nil {
-		return false
-	}
-	return len(data.Results) > 0
+        args := []string{
+                "run", "--rm", "-v", repo + ":/src",
+                "returntocorp/semgrep", "semgrep", "scan",
+                "--json", "-q", "--lang", lang, "-e", pattern, "/src",
+        }
+        cmd := exec.Command("docker", args...)
+        out, err := runCommand(cmd, 0, 1)
+        if err != nil {
+                return false
+        }
+        var data struct {
+                Results []struct{} `json:"results"`
+        }
+        if err := parseJSON(out, &data); err != nil {
+                return false
+        }
+        return len(data.Results) > 0
 }
 
 func runAnalyses(repo string, languages []string, frameworks map[string][]string) (map[string]int, []string) {
