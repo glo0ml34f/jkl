@@ -401,10 +401,7 @@ func scanDependencies(repo string) ([]DepFinding, error) {
 	}
 	var data struct {
 		Results []struct {
-			Source struct {
-				Path string `json:"path"`
-				Type string `json:"type"`
-			} `json:"source"`
+			Source   json.RawMessage `json:"source"`
 			Packages []struct {
 				Package struct {
 					Name      string `json:"name"`
@@ -421,7 +418,16 @@ func scanDependencies(repo string) ([]DepFinding, error) {
 	}
 	findings := []DepFinding{}
 	for _, r := range data.Results {
-		p := strings.TrimPrefix(r.Source.Path, "/src/")
+		var src struct {
+			Path string `json:"path"`
+		}
+		path := ""
+		if err := json.Unmarshal(r.Source, &path); err != nil {
+			if err := json.Unmarshal(r.Source, &src); err == nil {
+				path = src.Path
+			}
+		}
+		p := strings.TrimPrefix(path, "/src/")
 		vulns := []string{}
 		for _, pkg := range r.Packages {
 			for _, v := range pkg.Vulnerabilities {
