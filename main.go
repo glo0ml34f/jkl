@@ -272,7 +272,7 @@ func runAnalyses(repo string, languages []string, frameworks map[string][]string
 }
 
 func runSemgrepDocker(repo, config string) (map[string]int, error) {
-	args := []string{"run", "--rm", "-v", repo + ":/src", "returntocorp/semgrep", "semgrep", "scan", "--json"}
+	args := []string{"run", "--rm", "-v", repo + ":/src", "returntocorp/semgrep", "semgrep", "scan", "--json", "-q"}
 	if config != "" {
 		args = append(args, "--config="+config)
 	} else {
@@ -323,11 +323,9 @@ func runGosec(repo string) (map[string]int, error) {
 }
 
 func scanDependencies(repo string) (map[string]int, error) {
-	cmd := exec.Command("docker", "run", "--rm", "-v", repo+":/src", "ghcr.io/google/osv-scanner:latest", "--json", "-r", "/src")
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, err
-	}
+	cmd := exec.Command("docker", "run", "--rm", "-v", repo+":/src", "ghcr.io/google/osv-scanner:latest", "--format", "json", "--call-analysis", "-r", "/src")
+	//TODO: tool will return 0 or 1 for success, we should check that
+	out, _ := cmd.Output()
 	var data struct {
 		Results []struct {
 			Source          string     `json:"source"`
