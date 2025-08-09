@@ -272,7 +272,7 @@ func runAnalyses(repo string, languages []string, frameworks map[string][]string
 }
 
 func runSemgrepDocker(repo, config string) (map[string]int, error) {
-	args := []string{"run", "--rm", "-v", repo + ":/src", "returntocorp/semgrep", "--json"}
+	args := []string{"run", "--rm", "-v", repo + ":/src", "returntocorp/semgrep", "semgrep", "scan", "--json"}
 	if config != "" {
 		args = append(args, "--config="+config)
 	} else {
