@@ -38,6 +38,10 @@ func main() {
 		os.Exit(1)
 	}
 	repo := flag.Arg(0)
+	repo, err := filepath.Abs(repo)
+	if err != nil {
+		log.Fatalf("failed to resolve path: %v", err)
+	}
 
 	if _, err := exec.LookPath("docker"); err != nil {
 		fmt.Println("required binary \"docker\" not found in PATH")
@@ -121,24 +125,24 @@ func detectFrameworks(repo string, languages []string) map[string][]string {
 	for _, lang := range languages {
 		switch lang {
 		case "Python":
-			if runSemgrep(repo, "python", "import django") || runSemgrep(repo, "python", "from django import $X") {
+			if runSemgrepPatternDocker(repo, "python", "import django") || runSemgrepPatternDocker(repo, "python", "from django import $X") {
 				result["Python"] = append(result["Python"], "Django")
 			}
-			if runSemgrep(repo, "python", "import flask") || runSemgrep(repo, "python", "from flask import $X") {
+			if runSemgrepPatternDocker(repo, "python", "import flask") || runSemgrepPatternDocker(repo, "python", "from flask import $X") {
 				result["Python"] = append(result["Python"], "Flask")
 			}
 		case "JavaScript":
-			if runSemgrep(repo, "js", "import express") || runSemgrep(repo, "js", "require('express')") {
+			if runSemgrepPatternDocker(repo, "js", "import express") || runSemgrepPatternDocker(repo, "js", "require('express')") {
 				result["JavaScript"] = append(result["JavaScript"], "Express")
 			}
-			if runSemgrep(repo, "js", "import next") || runSemgrep(repo, "js", "require('next')") {
+			if runSemgrepPatternDocker(repo, "js", "import next") || runSemgrepPatternDocker(repo, "js", "require('next')") {
 				result["JavaScript"] = append(result["JavaScript"], "Next.js")
 			}
 		case "Go":
-			if runSemgrep(repo, "go", "import \"github.com/gin-gonic/gin\"") {
+			if runSemgrepPatternDocker(repo, "go", "import \"github.com/gin-gonic/gin\"") {
 				result["Go"] = append(result["Go"], "Gin")
 			}
-			if runSemgrep(repo, "go", "import \"github.com/labstack/echo\"") {
+			if runSemgrepPatternDocker(repo, "go", "import \"github.com/labstack/echo\"") {
 				result["Go"] = append(result["Go"], "Echo")
 			}
 		case "Rust":
@@ -193,8 +197,9 @@ func hasInFile(p, substr string) bool {
 	return strings.Contains(string(b), substr)
 }
 
-func runSemgrep(repo, lang, pattern string) bool {
-	cmd := exec.Command("semgrep", "--json", "--lang", lang, "-e", pattern, repo)
+func runSemgrepPatternDocker(repo, lang, pattern string) bool {
+	args := []string{"run", "--rm", "-v", repo + ":/src", "returntocorp/semgrep", "--json", "--lang", lang, "-e", pattern, "/src"}
+	cmd := exec.Command("docker", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -219,6 +224,9 @@ func runAnalyses(repo string, languages []string, frameworks map[string][]string
 	seen := map[string]bool{}
 	tools := map[string]bool{}
 	for _, lang := range languages {
+		if lang == "Text" {
+			continue
+		}
 		if seen[lang] {
 			continue
 		}
@@ -264,7 +272,7 @@ func runAnalyses(repo string, languages []string, frameworks map[string][]string
 }
 
 func runSemgrepDocker(repo, config string) (map[string]int, error) {
-	args := []string{"run", "--rm", "-v", repo + ":/src", "returntocorp/semgrep", "semgrep", "--json"}
+	args := []string{"run", "--rm", "-v", repo + ":/src", "returntocorp/semgrep", "--json"}
 	if config != "" {
 		args = append(args, "--config="+config)
 	} else {
@@ -272,9 +280,9 @@ func runSemgrepDocker(repo, config string) (map[string]int, error) {
 	}
 	args = append(args, "/src")
 	cmd := exec.Command("docker", args...)
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
 	var data struct {
 		Results []struct {
