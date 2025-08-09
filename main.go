@@ -15,6 +15,7 @@ import (
 
 type Finding struct {
 	File    string
+	Line    int
 	Rule    string
 	Message string
 }
@@ -102,7 +103,7 @@ func main() {
 	}
 
 	tools := append([]string{"cloc", "osv-scanner"}, analysisTools...)
-	if err := writeSARIF(countFindings(findings), countDepFindings(depFindings), "report.sarif"); err != nil {
+	if err := writeSARIF(findings, depFindings, "report.sarif"); err != nil {
 		log.Printf("failed to write SARIF: %v", err)
 	}
 	if err := writeMarkdown(languages, frameworks, buildsystems, findings, depFindings, tools, "report.md"); err != nil {
@@ -348,7 +349,10 @@ func runSemgrepDocker(repo, config string) ([]Finding, error) {
 		Results []struct {
 			CheckID string `json:"check_id"`
 			Path    string `json:"path"`
-			Extra   struct {
+			Start   struct {
+				Line int `json:"line"`
+			} `json:"start"`
+			Extra struct {
 				Message string `json:"message"`
 			} `json:"extra"`
 		} `json:"results"`
@@ -359,7 +363,7 @@ func runSemgrepDocker(repo, config string) ([]Finding, error) {
 	findings := []Finding{}
 	for _, r := range data.Results {
 		p := strings.TrimPrefix(r.Path, "/src/")
-		findings = append(findings, Finding{File: p, Rule: r.CheckID, Message: r.Extra.Message})
+		findings = append(findings, Finding{File: p, Line: r.Start.Line, Rule: r.CheckID, Message: r.Extra.Message})
 	}
 	return findings, nil
 }
@@ -375,6 +379,7 @@ func runGosec(repo string) ([]Finding, error) {
 			File    string `json:"file"`
 			RuleID  string `json:"rule_id"`
 			Details string `json:"details"`
+			Line    int    `json:"line"`
 		} `json:"Issues"`
 	}
 	if err := parseJSON(out, &data); err != nil {
@@ -383,7 +388,7 @@ func runGosec(repo string) ([]Finding, error) {
 	findings := []Finding{}
 	for _, i := range data.Issues {
 		p := strings.TrimPrefix(i.File, "/src/")
-		findings = append(findings, Finding{File: p, Rule: i.RuleID, Message: i.Details})
+		findings = append(findings, Finding{File: p, Line: i.Line, Rule: i.RuleID, Message: i.Details})
 	}
 	return findings, nil
 }
@@ -486,12 +491,15 @@ func countDepFindings(df []DepFinding) map[string]int {
 	return m
 }
 
-func writeSARIF(code, deps map[string]int, path string) error {
+func writeSARIF(code []Finding, deps []DepFinding, path string) error {
 	type location struct {
 		PhysicalLocation struct {
 			ArtifactLocation struct {
 				URI string `json:"uri"`
 			} `json:"artifactLocation"`
+			Region struct {
+				StartLine int `json:"startLine"`
+			} `json:"region"`
 		} `json:"physicalLocation"`
 	}
 	type result struct {
@@ -502,18 +510,21 @@ func writeSARIF(code, deps map[string]int, path string) error {
 		Locations []location `json:"locations"`
 	}
 	res := []result{}
-	for f, c := range code {
-		r := result{RuleID: "code"}
-		r.Message.Text = fmt.Sprintf("%d issues", c)
-		r.Locations = []location{{}}
-		r.Locations[0].PhysicalLocation.ArtifactLocation.URI = f
+	for _, f := range code {
+		r := result{RuleID: f.Rule}
+		r.Message.Text = f.Message
+		loc := location{}
+		loc.PhysicalLocation.ArtifactLocation.URI = f.File
+		loc.PhysicalLocation.Region.StartLine = f.Line
+		r.Locations = []location{loc}
 		res = append(res, r)
 	}
-	for f, c := range deps {
+	for _, d := range deps {
 		r := result{RuleID: "dependency"}
-		r.Message.Text = fmt.Sprintf("%d vulnerabilities", c)
-		r.Locations = []location{{}}
-		r.Locations[0].PhysicalLocation.ArtifactLocation.URI = f
+		r.Message.Text = strings.Join(d.Vulnerabilities, ", ")
+		loc := location{}
+		loc.PhysicalLocation.ArtifactLocation.URI = d.Manifest
+		r.Locations = []location{loc}
 		res = append(res, r)
 	}
 	sarif := map[string]interface{}{
@@ -559,10 +570,10 @@ func writeMarkdown(langs []string, frameworks, builds map[string][]string, code 
 		b.WriteString(fmt.Sprintf("- %s: %v\n", lang, bs))
 	}
 	if len(code) > 0 {
-		b.WriteString("\n## Code Findings\n\n| File | Rule | Message |\n|---|---|---|\n")
+		b.WriteString("\n## Code Findings\n\n| File | Line | Rule | Message |\n|---|---|---|---|\n")
 		for _, f := range code {
 			msg := strings.ReplaceAll(f.Message, "|", "\\|")
-			b.WriteString(fmt.Sprintf("| %s | %s | %s |\n", f.File, f.Rule, msg))
+			b.WriteString(fmt.Sprintf("| %s | %d | %s | %s |\n", f.File, f.Line, f.Rule, msg))
 		}
 	}
 	if len(deps) > 0 {
