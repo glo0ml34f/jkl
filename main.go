@@ -144,7 +144,7 @@ func detectFrameworks(repo string, languages []string) map[string][]string {
 			if runSemgrepPatternDocker(repo, "python", "import django") || runSemgrepPatternDocker(repo, "python", "from django import $X") {
 				result["Python"] = append(result["Python"], "Django")
 			}
-			if runSemgrepPatternDocker(repo, "python", "import flask") || runSemgrepPatternDocker(repo, "python", "from flask import $X") {
+			if runSemgrepPatternDocker(repo, "python", "import flask") || runSemgrepPatternDocker(repo, "python", "from flask import Flask") {
 				result["Python"] = append(result["Python"], "Flask")
 			}
 		case "JavaScript":
@@ -401,10 +401,19 @@ func scanDependencies(repo string) ([]DepFinding, error) {
 	}
 	var data struct {
 		Results []struct {
-			Source          string `json:"source"`
-			Vulnerabilities []struct {
-				ID string `json:"id"`
-			} `json:"vulnerabilities"`
+			Source struct {
+				Path string `json:"path"`
+				Type string `json:"type"`
+			} `json:"source"`
+			Packages []struct {
+				Package struct {
+					Name      string `json:"name"`
+					Ecosystem string `json:"ecosystem"`
+				} `json:"package"`
+				Vulnerabilities []struct {
+					ID string `json:"id"`
+				} `json:"vulnerabilities"`
+			} `json:"packages"`
 		} `json:"results"`
 	}
 	if err := parseJSON(out, &data); err != nil {
@@ -412,10 +421,12 @@ func scanDependencies(repo string) ([]DepFinding, error) {
 	}
 	findings := []DepFinding{}
 	for _, r := range data.Results {
-		p := strings.TrimPrefix(r.Source, "/src/")
+		p := strings.TrimPrefix(r.Source.Path, "/src/")
 		vulns := []string{}
-		for _, v := range r.Vulnerabilities {
-			vulns = append(vulns, v.ID)
+		for _, pkg := range r.Packages {
+			for _, v := range pkg.Vulnerabilities {
+				vulns = append(vulns, v.ID)
+			}
 		}
 		findings = append(findings, DepFinding{Manifest: p, Vulnerabilities: vulns})
 	}
