@@ -96,6 +96,10 @@ func main() {
 		fmt.Println("Files with most findings:")
 		rankAndPrint(findings)
 	}
+	if len(depFindings) > 0 {
+		fmt.Println("Dependency manifests with most vulnerabilities:")
+		rankAndPrintDeps(depFindings)
+	}
 
 	tools := append([]string{"cloc", "osv-scanner"}, analysisTools...)
 	if err := writeSARIF(countFindings(findings), countDepFindings(depFindings), "report.sarif"); err != nil {
@@ -447,6 +451,22 @@ func rankAndPrint(findings []Finding) {
 	sort.Slice(list, func(i, j int) bool { return list[i].Count > list[j].Count })
 	for _, kv := range list {
 		fmt.Printf("%s: %d\n", kv.File, kv.Count)
+	}
+}
+
+func rankAndPrintDeps(findings []DepFinding) {
+	counts := countDepFindings(findings)
+	type kv struct {
+		Manifest string
+		Count    int
+	}
+	list := make([]kv, 0, len(counts))
+	for k, v := range counts {
+		list = append(list, kv{k, v})
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Count > list[j].Count })
+	for _, kv := range list {
+		fmt.Printf("%s: %d\n", kv.Manifest, kv.Count)
 	}
 }
 
