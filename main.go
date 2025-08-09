@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -106,7 +107,7 @@ func detectLanguages(repo, exclude string) ([]string, error) {
 		return nil, err
 	}
 	var data map[string]json.RawMessage
-	if err := json.Unmarshal(out, &data); err != nil {
+	if err := parseJSON(out, &data); err != nil {
 		return nil, err
 	}
 	langs := []string{}
@@ -198,25 +199,45 @@ func hasInFile(p, substr string) bool {
 
 func runCommand(cmd *exec.Cmd, allowedExitCodes ...int) ([]byte, error) {
 	log.Printf("running: %s", strings.Join(cmd.Args, " "))
-	out, err := cmd.CombinedOutput()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	code := 0
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		code = exitErr.ExitCode()
+	}
+	log.Printf("exit code: %d", code)
+	if stdout.Len() > 0 {
+		log.Printf("stdout: %s", strings.TrimSpace(stdout.String()))
+	}
+	if stderr.Len() > 0 {
+		log.Printf("stderr: %s", strings.TrimSpace(stderr.String()))
+	}
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			code := exitErr.ExitCode()
-			allow := len(allowedExitCodes) == 0
-			for _, c := range allowedExitCodes {
-				if code == c {
-					allow = true
-					break
-				}
+		allow := len(allowedExitCodes) == 0
+		for _, c := range allowedExitCodes {
+			if code == c {
+				allow = true
+				break
 			}
-			if !allow {
-				return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
-			}
-		} else {
-			return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+		}
+		if !allow {
+			return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(stderr.String()))
 		}
 	}
-	return out, nil
+	return stdout.Bytes(), nil
+}
+
+func parseJSON(b []byte, v interface{}) error {
+	if err := json.Unmarshal(b, v); err != nil {
+		snippet := strings.TrimSpace(string(b))
+		if len(snippet) > 200 {
+			snippet = snippet[:200] + "..."
+		}
+		return fmt.Errorf("invalid JSON: %w: %s", err, snippet)
+	}
+	return nil
 }
 
 func runSemgrepPatternDocker(repo, lang, pattern string) bool {
@@ -229,7 +250,7 @@ func runSemgrepPatternDocker(repo, lang, pattern string) bool {
 	var data struct {
 		Results []struct{} `json:"results"`
 	}
-	if err := json.Unmarshal(out, &data); err != nil {
+	if err := parseJSON(out, &data); err != nil {
 		return false
 	}
 	return len(data.Results) > 0
@@ -305,7 +326,7 @@ func runSemgrepDocker(repo, config string) (map[string]int, error) {
 			Path string `json:"path"`
 		} `json:"results"`
 	}
-	if err := json.Unmarshal(out, &data); err != nil {
+	if err := parseJSON(out, &data); err != nil {
 		return nil, err
 	}
 	counts := map[string]int{}
@@ -327,7 +348,7 @@ func runGosec(repo string) (map[string]int, error) {
 			File string `json:"file"`
 		} `json:"Issues"`
 	}
-	if err := json.Unmarshal(out, &data); err != nil {
+	if err := parseJSON(out, &data); err != nil {
 		return nil, err
 	}
 	counts := map[string]int{}
@@ -350,7 +371,7 @@ func scanDependencies(repo string) (map[string]int, error) {
 			Vulnerabilities []struct{} `json:"vulnerabilities"`
 		} `json:"results"`
 	}
-	if err := json.Unmarshal(out, &data); err != nil {
+	if err := parseJSON(out, &data); err != nil {
 		return nil, err
 	}
 	counts := map[string]int{}
