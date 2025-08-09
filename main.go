@@ -100,9 +100,8 @@ func detectLanguages(repo, exclude string) ([]string, error) {
 		args = append(args, "--exclude-dir="+exclude)
 	}
 	args = append(args, "--json", "/src")
-	log.Printf("running docker %v", args)
 	cmd := exec.Command("docker", args...)
-	out, err := cmd.Output()
+	out, err := runCommand(cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -197,18 +196,35 @@ func hasInFile(p, substr string) bool {
 	return strings.Contains(string(b), substr)
 }
 
-func runSemgrepPatternDocker(repo, lang, pattern string) bool {
-	args := []string{"run", "--rm", "-v", repo + ":/src", "returntocorp/semgrep", "--json", "--lang", lang, "-e", pattern, "/src"}
-	cmd := exec.Command("docker", args...)
+func runCommand(cmd *exec.Cmd, allowedExitCodes ...int) ([]byte, error) {
+	log.Printf("running: %s", strings.Join(cmd.Args, " "))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			if exitErr.ExitCode() != 1 && exitErr.ExitCode() != 0 {
-				return false
+			code := exitErr.ExitCode()
+			allow := len(allowedExitCodes) == 0
+			for _, c := range allowedExitCodes {
+				if code == c {
+					allow = true
+					break
+				}
+			}
+			if !allow {
+				return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 			}
 		} else {
-			return false
+			return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 		}
+	}
+	return out, nil
+}
+
+func runSemgrepPatternDocker(repo, lang, pattern string) bool {
+	args := []string{"run", "--rm", "-v", repo + ":/src", "returntocorp/semgrep", "--json", "--lang", lang, "-e", pattern, "/src"}
+	cmd := exec.Command("docker", args...)
+	out, err := runCommand(cmd, 0, 1)
+	if err != nil {
+		return false
 	}
 	var data struct {
 		Results []struct{} `json:"results"`
@@ -280,9 +296,9 @@ func runSemgrepDocker(repo, config string) (map[string]int, error) {
 	}
 	args = append(args, "/src")
 	cmd := exec.Command("docker", args...)
-	out, err := cmd.CombinedOutput()
+	out, err := runCommand(cmd, 0, 1)
 	if err != nil {
-		return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+		return nil, err
 	}
 	var data struct {
 		Results []struct {
@@ -302,7 +318,7 @@ func runSemgrepDocker(repo, config string) (map[string]int, error) {
 
 func runGosec(repo string) (map[string]int, error) {
 	cmd := exec.Command("docker", "run", "--rm", "-v", repo+":/src", "securego/gosec", "-fmt=json", "/src/...")
-	out, err := cmd.Output()
+	out, err := runCommand(cmd, 0, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -324,8 +340,10 @@ func runGosec(repo string) (map[string]int, error) {
 
 func scanDependencies(repo string) (map[string]int, error) {
 	cmd := exec.Command("docker", "run", "--rm", "-v", repo+":/src", "ghcr.io/google/osv-scanner:latest", "--format", "json", "--call-analysis", "-r", "/src")
-	//TODO: tool will return 0 or 1 for success, we should check that
-	out, _ := cmd.Output()
+	out, err := runCommand(cmd, 0, 1)
+	if err != nil {
+		return nil, err
+	}
 	var data struct {
 		Results []struct {
 			Source          string     `json:"source"`
