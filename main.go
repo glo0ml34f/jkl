@@ -95,7 +95,7 @@ func main() {
 }
 
 func detectLanguages(repo, exclude string) ([]string, error) {
-	args := []string{"run", "--rm", "-v", repo + ":/src", "aldanial/cloc"}
+	args := []string{"run", "--rm", "-v", repo + ":/src", "aldanial/cloc", "cloc"}
 	if exclude != "" {
 		args = append(args, "--exclude-dir="+exclude)
 	}
