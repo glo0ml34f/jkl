@@ -13,6 +13,18 @@ import (
 	"strings"
 )
 
+type Finding struct {
+	File    string
+	Line    int
+	Rule    string
+	Message string
+}
+
+type DepFinding struct {
+	Manifest        string
+	Vulnerabilities []string
+}
+
 var (
 	debug      bool
 	excludeDir string
@@ -85,6 +97,10 @@ func main() {
 		fmt.Println("Files with most findings:")
 		rankAndPrint(findings)
 	}
+	if len(depFindings) > 0 {
+		fmt.Println("Dependency manifests with most vulnerabilities:")
+		rankAndPrintDeps(depFindings)
+	}
 
 	tools := append([]string{"cloc", "osv-scanner"}, analysisTools...)
 	if err := writeSARIF(findings, depFindings, "report.sarif"); err != nil {
@@ -128,7 +144,7 @@ func detectFrameworks(repo string, languages []string) map[string][]string {
 			if runSemgrepPatternDocker(repo, "python", "import django") || runSemgrepPatternDocker(repo, "python", "from django import $X") {
 				result["Python"] = append(result["Python"], "Django")
 			}
-			if runSemgrepPatternDocker(repo, "python", "import flask") || runSemgrepPatternDocker(repo, "python", "from flask import $X") {
+			if runSemgrepPatternDocker(repo, "python", "import flask") || runSemgrepPatternDocker(repo, "python", "from flask import Flask") {
 				result["Python"] = append(result["Python"], "Flask")
 			}
 		case "JavaScript":
@@ -241,27 +257,27 @@ func parseJSON(b []byte, v interface{}) error {
 }
 
 func runSemgrepPatternDocker(repo, lang, pattern string) bool {
-        args := []string{
-                "run", "--rm", "-v", repo + ":/src",
-                "returntocorp/semgrep", "semgrep", "scan",
-                "--json", "-q", "--lang", lang, "-e", pattern, "/src",
-        }
-        cmd := exec.Command("docker", args...)
-        out, err := runCommand(cmd, 0, 1)
-        if err != nil {
-                return false
-        }
-        var data struct {
-                Results []struct{} `json:"results"`
-        }
-        if err := parseJSON(out, &data); err != nil {
-                return false
-        }
-        return len(data.Results) > 0
+	args := []string{
+		"run", "--rm", "-v", repo + ":/src",
+		"returntocorp/semgrep", "semgrep", "scan",
+		"--json", "-q", "--lang", lang, "-e", pattern, "/src",
+	}
+	cmd := exec.Command("docker", args...)
+	out, err := runCommand(cmd, 0, 1)
+	if err != nil {
+		return false
+	}
+	var data struct {
+		Results []struct{} `json:"results"`
+	}
+	if err := parseJSON(out, &data); err != nil {
+		return false
+	}
+	return len(data.Results) > 0
 }
 
-func runAnalyses(repo string, languages []string, frameworks map[string][]string) (map[string]int, []string) {
-	findings := map[string]int{}
+func runAnalyses(repo string, languages []string, frameworks map[string][]string) ([]Finding, []string) {
+	findings := []Finding{}
 	seen := map[string]bool{}
 	tools := map[string]bool{}
 	for _, lang := range languages {
@@ -272,27 +288,31 @@ func runAnalyses(repo string, languages []string, frameworks map[string][]string
 			continue
 		}
 		seen[lang] = true
-		var (
-			m   map[string]int
-			err error
-		)
 		switch lang {
 		case "Go":
-			m, err = runGosec(repo)
-			if err == nil {
-				tools["gosec"] = true
+			fs, err := runGosec(repo)
+			if err != nil {
+				log.Printf("analysis for %s failed: %v", lang, err)
+				continue
 			}
+			tools["gosec"] = true
+			findings = append(findings, fs...)
 		default:
-			m, err = runSemgrepDocker(repo, "")
-			if err == nil {
+			fs, err := runSemgrepDocker(repo, "p/owasp-top-ten")
+			if err != nil {
+				log.Printf("analysis for %s failed: %v", lang, err)
+			} else {
 				tools["semgrep"] = true
+				findings = append(findings, fs...)
+			}
+			ci, err := runSemgrepDocker(repo, "p/command-injection")
+			if err != nil {
+				log.Printf("command scan failed: %v", err)
+			} else {
+				tools["semgrep"] = true
+				findings = append(findings, ci...)
 			}
 		}
-		if err != nil {
-			log.Printf("analysis for %s failed: %v", lang, err)
-			continue
-		}
-		mergeMaps(findings, m)
 		for _, fw := range frameworks[lang] {
 			if rule := frameworkRule(fw); rule != "" {
 				fm, err := runSemgrepDocker(repo, rule)
@@ -301,7 +321,7 @@ func runAnalyses(repo string, languages []string, frameworks map[string][]string
 					continue
 				}
 				tools["semgrep"] = true
-				mergeMaps(findings, fm)
+				findings = append(findings, fm...)
 			}
 		}
 	}
@@ -312,7 +332,7 @@ func runAnalyses(repo string, languages []string, frameworks map[string][]string
 	return findings, toolList
 }
 
-func runSemgrepDocker(repo, config string) (map[string]int, error) {
+func runSemgrepDocker(repo, config string) ([]Finding, error) {
 	args := []string{"run", "--rm", "-v", repo + ":/src", "returntocorp/semgrep", "semgrep", "scan", "--json", "-q"}
 	if config != "" {
 		args = append(args, "--config="+config)
@@ -327,21 +347,28 @@ func runSemgrepDocker(repo, config string) (map[string]int, error) {
 	}
 	var data struct {
 		Results []struct {
-			Path string `json:"path"`
+			CheckID string `json:"check_id"`
+			Path    string `json:"path"`
+			Start   struct {
+				Line int `json:"line"`
+			} `json:"start"`
+			Extra struct {
+				Message string `json:"message"`
+			} `json:"extra"`
 		} `json:"results"`
 	}
 	if err := parseJSON(out, &data); err != nil {
 		return nil, err
 	}
-	counts := map[string]int{}
+	findings := []Finding{}
 	for _, r := range data.Results {
 		p := strings.TrimPrefix(r.Path, "/src/")
-		counts[p]++
+		findings = append(findings, Finding{File: p, Line: r.Start.Line, Rule: r.CheckID, Message: r.Extra.Message})
 	}
-	return counts, nil
+	return findings, nil
 }
 
-func runGosec(repo string) (map[string]int, error) {
+func runGosec(repo string) ([]Finding, error) {
 	cmd := exec.Command("docker", "run", "--rm", "-v", repo+":/src", "securego/gosec", "-fmt=json", "/src/...")
 	out, err := runCommand(cmd, 0, 1)
 	if err != nil {
@@ -349,21 +376,24 @@ func runGosec(repo string) (map[string]int, error) {
 	}
 	var data struct {
 		Issues []struct {
-			File string `json:"file"`
+			File    string `json:"file"`
+			RuleID  string `json:"rule_id"`
+			Details string `json:"details"`
+			Line    int    `json:"line"`
 		} `json:"Issues"`
 	}
 	if err := parseJSON(out, &data); err != nil {
 		return nil, err
 	}
-	counts := map[string]int{}
+	findings := []Finding{}
 	for _, i := range data.Issues {
 		p := strings.TrimPrefix(i.File, "/src/")
-		counts[p]++
+		findings = append(findings, Finding{File: p, Line: i.Line, Rule: i.RuleID, Message: i.Details})
 	}
-	return counts, nil
+	return findings, nil
 }
 
-func scanDependencies(repo string) (map[string]int, error) {
+func scanDependencies(repo string) ([]DepFinding, error) {
 	cmd := exec.Command("docker", "run", "--rm", "-v", repo+":/src", "ghcr.io/google/osv-scanner:latest", "--format", "json", "--call-analysis", "-r", "/src")
 	out, err := runCommand(cmd, 0, 1)
 	if err != nil {
@@ -371,19 +401,42 @@ func scanDependencies(repo string) (map[string]int, error) {
 	}
 	var data struct {
 		Results []struct {
-			Source          string     `json:"source"`
-			Vulnerabilities []struct{} `json:"vulnerabilities"`
+			Source   json.RawMessage `json:"source"`
+			Packages []struct {
+				Package struct {
+					Name      string `json:"name"`
+					Ecosystem string `json:"ecosystem"`
+				} `json:"package"`
+				Vulnerabilities []struct {
+					ID string `json:"id"`
+				} `json:"vulnerabilities"`
+			} `json:"packages"`
 		} `json:"results"`
 	}
 	if err := parseJSON(out, &data); err != nil {
 		return nil, err
 	}
-	counts := map[string]int{}
+	findings := []DepFinding{}
 	for _, r := range data.Results {
-		p := strings.TrimPrefix(r.Source, "/src/")
-		counts[p] = len(r.Vulnerabilities)
+		var src struct {
+			Path string `json:"path"`
+		}
+		path := ""
+		if err := json.Unmarshal(r.Source, &path); err != nil {
+			if err := json.Unmarshal(r.Source, &src); err == nil {
+				path = src.Path
+			}
+		}
+		p := strings.TrimPrefix(path, "/src/")
+		vulns := []string{}
+		for _, pkg := range r.Packages {
+			for _, v := range pkg.Vulnerabilities {
+				vulns = append(vulns, v.ID)
+			}
+		}
+		findings = append(findings, DepFinding{Manifest: p, Vulnerabilities: vulns})
 	}
-	return counts, nil
+	return findings, nil
 }
 
 func frameworkRule(f string) string {
@@ -407,19 +460,14 @@ func frameworkRule(f string) string {
 	}
 }
 
-func mergeMaps(dst, src map[string]int) {
-	for k, v := range src {
-		dst[k] += v
-	}
-}
-
-func rankAndPrint(m map[string]int) {
+func rankAndPrint(findings []Finding) {
+	counts := countFindings(findings)
 	type kv struct {
 		File  string
 		Count int
 	}
-	list := make([]kv, 0, len(m))
-	for k, v := range m {
+	list := make([]kv, 0, len(counts))
+	for k, v := range counts {
 		list = append(list, kv{k, v})
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].Count > list[j].Count })
@@ -428,12 +476,47 @@ func rankAndPrint(m map[string]int) {
 	}
 }
 
-func writeSARIF(code, deps map[string]int, path string) error {
+func rankAndPrintDeps(findings []DepFinding) {
+	counts := countDepFindings(findings)
+	type kv struct {
+		Manifest string
+		Count    int
+	}
+	list := make([]kv, 0, len(counts))
+	for k, v := range counts {
+		list = append(list, kv{k, v})
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Count > list[j].Count })
+	for _, kv := range list {
+		fmt.Printf("%s: %d\n", kv.Manifest, kv.Count)
+	}
+}
+
+func countFindings(fs []Finding) map[string]int {
+	m := map[string]int{}
+	for _, f := range fs {
+		m[f.File]++
+	}
+	return m
+}
+
+func countDepFindings(df []DepFinding) map[string]int {
+	m := map[string]int{}
+	for _, d := range df {
+		m[d.Manifest] = len(d.Vulnerabilities)
+	}
+	return m
+}
+
+func writeSARIF(code []Finding, deps []DepFinding, path string) error {
 	type location struct {
 		PhysicalLocation struct {
 			ArtifactLocation struct {
 				URI string `json:"uri"`
 			} `json:"artifactLocation"`
+			Region struct {
+				StartLine int `json:"startLine"`
+			} `json:"region"`
 		} `json:"physicalLocation"`
 	}
 	type result struct {
@@ -444,18 +527,21 @@ func writeSARIF(code, deps map[string]int, path string) error {
 		Locations []location `json:"locations"`
 	}
 	res := []result{}
-	for f, c := range code {
-		r := result{RuleID: "code"}
-		r.Message.Text = fmt.Sprintf("%d issues", c)
-		r.Locations = []location{{}}
-		r.Locations[0].PhysicalLocation.ArtifactLocation.URI = f
+	for _, f := range code {
+		r := result{RuleID: f.Rule}
+		r.Message.Text = f.Message
+		loc := location{}
+		loc.PhysicalLocation.ArtifactLocation.URI = f.File
+		loc.PhysicalLocation.Region.StartLine = f.Line
+		r.Locations = []location{loc}
 		res = append(res, r)
 	}
-	for f, c := range deps {
+	for _, d := range deps {
 		r := result{RuleID: "dependency"}
-		r.Message.Text = fmt.Sprintf("%d vulnerabilities", c)
-		r.Locations = []location{{}}
-		r.Locations[0].PhysicalLocation.ArtifactLocation.URI = f
+		r.Message.Text = strings.Join(d.Vulnerabilities, ", ")
+		loc := location{}
+		loc.PhysicalLocation.ArtifactLocation.URI = d.Manifest
+		r.Locations = []location{loc}
 		res = append(res, r)
 	}
 	sarif := map[string]interface{}{
@@ -475,7 +561,7 @@ func writeSARIF(code, deps map[string]int, path string) error {
 	return os.WriteFile(path, b, 0644)
 }
 
-func writeMarkdown(langs []string, frameworks, builds map[string][]string, code, deps map[string]int, tools []string, path string) error {
+func writeMarkdown(langs []string, frameworks, builds map[string][]string, code []Finding, deps []DepFinding, tools []string, path string) error {
 	var b strings.Builder
 	b.WriteString("# Scan Report\n\n")
 	b.WriteString("## Tools Run\n")
@@ -501,15 +587,16 @@ func writeMarkdown(langs []string, frameworks, builds map[string][]string, code,
 		b.WriteString(fmt.Sprintf("- %s: %v\n", lang, bs))
 	}
 	if len(code) > 0 {
-		b.WriteString("\n## Code Findings\n\n| File | Findings |\n|---|---|\n")
-		for f, c := range code {
-			b.WriteString(fmt.Sprintf("| %s | %d |\n", f, c))
+		b.WriteString("\n## Code Findings\n\n| File | Line | Rule | Message |\n|---|---|---|---|\n")
+		for _, f := range code {
+			msg := strings.ReplaceAll(f.Message, "|", "\\|")
+			b.WriteString(fmt.Sprintf("| %s | %d | %s | %s |\n", f.File, f.Line, f.Rule, msg))
 		}
 	}
 	if len(deps) > 0 {
 		b.WriteString("\n## Dependency Findings\n\n| Manifest | Vulnerabilities |\n|---|---|\n")
-		for f, c := range deps {
-			b.WriteString(fmt.Sprintf("| %s | %d |\n", f, c))
+		for _, d := range deps {
+			b.WriteString(fmt.Sprintf("| %s | %s |\n", d.Manifest, strings.Join(d.Vulnerabilities, ", ")))
 		}
 	}
 	return os.WriteFile(path, []byte(b.String()), 0644)
