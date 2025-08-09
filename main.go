@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Finding struct {
@@ -25,14 +27,24 @@ type DepFinding struct {
 	Vulnerabilities []string
 }
 
+type Config struct {
+	Semgrep struct {
+		Languages    map[string][]string `yaml:"languages"`
+		Frameworks   map[string][]string `yaml:"frameworks"`
+		Dependencies []string            `yaml:"dependencies"`
+	} `yaml:"semgrep"`
+}
+
 var (
 	debug      bool
 	excludeDir string
+	rcfile     string
 )
 
 func init() {
 	flag.StringVar(&excludeDir, "exclude", "vendor,node_modules,venv,env,__pycache__,tests,test,third_party,build", "comma-separated list of directories to exclude from language detection")
 	flag.BoolVar(&debug, "debug", false, "enable debug logging")
+	flag.StringVar(&rcfile, "config", ".jklrc", "path to configuration file")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [options] <path-to-repo>\n\nOptions:\n", os.Args[0])
 		flag.PrintDefaults()
@@ -61,6 +73,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	cfg, err := loadConfig(rcfile)
+	if err != nil {
+		log.Fatalf("failed to load config: %v", err)
+	}
+
 	languages, err := detectLanguages(repo, excludeDir)
 	if err != nil {
 		fmt.Println("cloc error:", err)
@@ -87,7 +104,7 @@ func main() {
 		fmt.Printf("%s: %v\n", lang, bs)
 	}
 
-	findings, analysisTools := runAnalyses(repo, languages, frameworks)
+	findings, analysisTools := runAnalyses(repo, languages, frameworks, cfg)
 	depFindings, err := scanDependencies(repo)
 	if err != nil {
 		log.Printf("dependency scan failed: %v", err)
@@ -276,7 +293,7 @@ func runSemgrepPatternDocker(repo, lang, pattern string) bool {
 	return len(data.Results) > 0
 }
 
-func runAnalyses(repo string, languages []string, frameworks map[string][]string) ([]Finding, []string) {
+func runAnalyses(repo string, languages []string, frameworks map[string][]string, cfg Config) ([]Finding, []string) {
 	findings := []Finding{}
 	seen := map[string]bool{}
 	tools := map[string]bool{}
@@ -284,52 +301,71 @@ func runAnalyses(repo string, languages []string, frameworks map[string][]string
 		if lang == "Text" {
 			continue
 		}
-		if seen[lang] {
+		low := strings.ToLower(lang)
+		if seen[low] {
 			continue
 		}
-		seen[lang] = true
-		switch lang {
-		case "Go":
+		seen[low] = true
+		if lang == "Go" {
 			fs, err := runGosec(repo)
 			if err != nil {
 				log.Printf("analysis for %s failed: %v", lang, err)
-				continue
-			}
-			tools["gosec"] = true
-			findings = append(findings, fs...)
-		default:
-			fs, err := runSemgrepDocker(repo, "p/owasp-top-ten")
-			if err != nil {
-				log.Printf("analysis for %s failed: %v", lang, err)
 			} else {
-				tools["semgrep"] = true
+				tools["gosec"] = true
 				findings = append(findings, fs...)
 			}
-			ci, err := runSemgrepDocker(repo, "p/command-injection")
-			if err != nil {
-				log.Printf("command scan failed: %v", err)
-			} else {
-				tools["semgrep"] = true
-				findings = append(findings, ci...)
-			}
 		}
-		for _, fw := range frameworks[lang] {
-			if rule := frameworkRule(fw); rule != "" {
-				fm, err := runSemgrepDocker(repo, rule)
+		if rules, ok := cfg.Semgrep.Languages[low]; ok {
+			for _, rule := range rules {
+				fs, err := runSemgrepDocker(repo, rule)
 				if err != nil {
-					log.Printf("framework scan %s failed: %v", fw, err)
+					log.Printf("analysis for %s failed: %v", lang, err)
 					continue
 				}
 				tools["semgrep"] = true
-				findings = append(findings, fm...)
+				findings = append(findings, fs...)
 			}
 		}
+		for _, fw := range frameworks[lang] {
+			if frules, ok := cfg.Semgrep.Frameworks[strings.ToLower(fw)]; ok {
+				for _, rule := range frules {
+					fm, err := runSemgrepDocker(repo, rule)
+					if err != nil {
+						log.Printf("framework scan %s failed: %v", fw, err)
+						continue
+					}
+					tools["semgrep"] = true
+					findings = append(findings, fm...)
+				}
+			}
+		}
+	}
+	for _, rule := range cfg.Semgrep.Dependencies {
+		fs, err := runSemgrepDocker(repo, rule)
+		if err != nil {
+			log.Printf("dependency scan %s failed: %v", rule, err)
+			continue
+		}
+		tools["semgrep"] = true
+		findings = append(findings, fs...)
 	}
 	toolList := []string{}
 	for t := range tools {
 		toolList = append(toolList, t)
 	}
 	return findings, toolList
+}
+
+func loadConfig(path string) (Config, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, err
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(b, &cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
 }
 
 func runSemgrepDocker(repo, config string) ([]Finding, error) {
@@ -437,27 +473,6 @@ func scanDependencies(repo string) ([]DepFinding, error) {
 		findings = append(findings, DepFinding{Manifest: p, Vulnerabilities: vulns})
 	}
 	return findings, nil
-}
-
-func frameworkRule(f string) string {
-	switch strings.ToLower(f) {
-	case "django":
-		return "p/django"
-	case "flask":
-		return "p/flask"
-	case "express":
-		return "p/express"
-	case "gin":
-		return "p/gin"
-	case "echo":
-		return "p/echo"
-	case "rocket":
-		return "p/rocket"
-	case "actix":
-		return "p/actix"
-	default:
-		return ""
-	}
 }
 
 func rankAndPrint(findings []Finding) {
