@@ -1,0 +1,22 @@
+semgrep:
+  languages:
+    go:
+      - p/owasp-top-ten
+      - p/command-injection
+    javascript:
+      - p/owasp-top-ten
+      - p/command-injection
+    python:
+      - p/owasp-top-ten
+      - p/command-injection
+  frameworks:
+    express:
+      - p/express
+    flask:
+      - p/flask
+    gin:
+      - p/gin
+    django:
+      - p/django
+  dependencies:
+    - p/secrets

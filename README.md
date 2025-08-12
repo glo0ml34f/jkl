@@ -17,6 +17,7 @@ The command line accepts:
 
 * `-exclude` – comma separated list of directories to skip during language detection (defaults to common virtual environment and dependency folders).
 * `-debug` – enable verbose logging.
+* `-config` – path to a YAML configuration mapping languages and frameworks to Semgrep rule sets (defaults to `.jklrc`).
 
 Only `docker` must be available in your `PATH`; all other tooling runs inside containers.
 
